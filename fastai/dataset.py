@@ -359,7 +359,7 @@ class ImageData(ModelData):
         return self.__class__(new_ds[0].path, new_ds, self.bs, self.num_workers, self.classes)
 
     @staticmethod
-    def get_ds(fn, trn, val, tfms, test=None, **kwargs):
+    def get_ds(fn, trn, val, tfms, test=None, is_siamese=False, **kwargs):
         res = [
             fn(trn[0], trn[1], tfms[0], **kwargs), # train
             fn(val[0], val[1], tfms[1], **kwargs), # val
@@ -377,6 +377,8 @@ class ImageData(ModelData):
                 fn(test, test_lbls, tfms[0], **kwargs)  # test_aug
             ]
         else: res += [None,None]
+        if is_siamese:
+            res = [SiameseDataset(x) if x != None else x for x in res]
         return res
 
 
@@ -403,7 +405,7 @@ class ImageClassifierData(ImageData):
         return cls(path, datasets, bs, num_workers, classes=classes)
 
     @classmethod
-    def from_paths(cls, path, bs=64, tfms=(None,None), trn_name='train', val_name='valid', test_name=None, test_with_labels=False, num_workers=8):
+    def from_paths(cls, path, bs=64, tfms=(None,None), trn_name='train', val_name='valid', test_name=None, test_with_labels=False, num_workers=8, is_siamese=False):
         """ Read in images and their labels given as sub-folder names
 
         Arguments:
@@ -423,7 +425,7 @@ class ImageClassifierData(ImageData):
         if test_name:
             test = folder_source(path, test_name) if test_with_labels else read_dir(path, test_name)
         else: test = None
-        datasets = cls.get_ds(FilesIndexArrayDataset, trn, val, tfms, path=path, test=test)
+        datasets = cls.get_ds(FilesIndexArrayDataset, trn, val, tfms, path=path, test=test, is_siamese=is_siamese)
         return cls(path, datasets, bs, num_workers, classes=trn[2])
 
     @classmethod
@@ -486,4 +488,37 @@ def split_by_idx(idxs, *a):
     mask = np.zeros(len(a[0]),dtype=bool)
     mask[np.array(idxs)] = True
     return [(o[mask],o[~mask]) for o in a]
+
+class SiameseDataset(Dataset):
+    def __init__(self, ds, generate_once=True, npairs=None, pairs_fn=None):
+        self.ds = ds
+        self.generate_once = False
+        self.pairs_fn = self.generate_pairs if pairs_fn == None else pairs_fn
+        self.npairs = npairs if npairs != None else self.ds.get_c()*50
+        self.pairs = self.pairs_fn(self.ds, self.npairs)
+
+    def generate_pairs(self, ds, npairs):
+        nclasses, y, nelem = ds.get_c(), ds.y, ds.get_n()
+        per_class = npairs//nclasses
+        pairs = []
+        get_indices = lambda cond: [x[0] for x in np.argwhere(cond)] 
+        for i in range(nclasses):
+            pindices = get_indices(y==i)
+            nindices = get_indices(y != i)
+            ilen = len(pindices)
+            pos_samples = np.random.randint(ilen*ilen, size=per_class//2)
+            pos_pairs = [(pindices[x//ilen], pindices[x%ilen]) for x in pos_samples]
+            neg_samples = np.random.randint(ilen*(nelem-ilen), size=per_class//2)
+            neg_pairs = [(pindices[x//len(nindices)], nindices[x%len(nindices)]) for x in neg_samples]
+            pairs += pos_pairs + neg_pairs
+        return pairs
+
+    def __getitem__(self, idx):
+        id1, id2 = self.pairs[idx]
+        (x1, y1), (x2, y2) = self.ds[id1], self.ds[id2]
+        klass = 1 if y1 == y2 else 0
+        return [x1, x2, klass]
+
+    def __len__(self):
+        return len(self.pairs)
 
